@@ -1,23 +1,28 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import sqlite3
+import psycopg2
+import os
 from datetime import datetime
 from typing import Optional
 
 app = FastAPI()
 
-# Имя файла нашей базы данных
-DB_NAME = "database.db"
+# Получаем ссылку на базу данных Neon из настроек облака Render
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_db_connection():
+    """Функция для быстрого подключения к облачной PostgreSQL"""
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Функция, которая создает таблицу в базе данных и добавляет нужные колонки"""
-    conn = sqlite3.connect(DB_NAME)
+    """Функция, которая создает таблицу в облачной базе данных, если её нет"""
+    conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Создаем таблицу для логов входа (добавили поле client_ip)
+    # Создаем таблицу для логов входа (для Postgres используем SERIAL вместо AUTOINCREMENT)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             role TEXT NOT NULL,
             password TEXT,
@@ -25,24 +30,16 @@ def init_db():
             login_time TEXT NOT NULL
         )
     """)
-    
-    # Проверка на случай, если таблица старая и в ней нет колонок password или client_ip
-    cursor.execute("PRAGMA table_info(user_logs)")
-    columns = [column[1] for column in cursor.fetchall()]
-    
-    if "password" not in columns:
-        print("[DB INFO] Добавляем отсутствующую колонку password в таблицу user_logs...")
-        cursor.execute("ALTER TABLE user_logs ADD COLUMN password TEXT")
-        
-    if "client_ip" not in columns:
-        print("[DB INFO] Добавляем отсутствующую колонку client_ip в таблицу user_logs...")
-        cursor.execute("ALTER TABLE user_logs ADD COLUMN client_ip TEXT")
-        
     conn.commit()
+    cursor.close()
     conn.close()
+    print("[POSTGRES INFO] База данных проверена, таблица user_logs готова!")
 
-# Запускаем создание/проверку таблицы при старте сервера
-init_db()
+# Запускаем создание/проверку таблицы в облаке при старте сервера
+if DATABASE_URL:
+    init_db()
+else:
+    print("[ERROR] Переменная окружения DATABASE_URL не найдена!")
 
 class LoginData(BaseModel):
     username: str
@@ -52,26 +49,28 @@ class LoginData(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "Server is running", "db": "SQLite connected"}
+    return {"status": "Server is running", "db": "PostgreSQL (Neon) connected"}
 
 @app.post("/api/login")
 def login_user(data: LoginData):
     # Получаем текущее время
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    # Записываем данные в нашу SQLite базу (включая client_ip)
-    conn = sqlite3.connect(DB_NAME)
+    # Записываем данные в облачную PostgreSQL базу данных
+    conn = get_db_connection()
     cursor = conn.cursor()
+    
+    # В Postgres вместо знаков "?" используются "%s"
     cursor.execute(
-        "INSERT INTO user_logs (username, role, password, client_ip, login_time) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO user_logs (username, role, password, client_ip, login_time) VALUES (%s, %s, %s, %s, %s)",
         (data.username, data.role, data.password, data.client_ip, current_time)
     )
     conn.commit()
+    cursor.close()
     conn.close()
 
-    print(f"\n[🚀 SERVER LOG] Получен запрос от {data.username} ({data.role})")
-    print(f"[📍 IP LOG] Адрес клиента: {data.client_ip}")
-    print(f"[SQLITE LOG] Данные успешно записаны в БД!")
+    print(f"\n[SERVER LOG] Получен запрос от {data.username} ({data.role})")
+    print(f"[IP LOG] Адрес клиента: {data.client_ip}")
+    print(f"[NEON DB LOG] Данные успешно сохранены в облачную БД!")
     
     return {"status": "success", "saved_to_db": True}
-# uvicorn server:app --reload --port 8000

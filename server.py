@@ -15,7 +15,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Функция, которая создает необходимые таблицы в облачной базе данных, если их нет"""
+    """Функция, которая создает таблицы в облачной базе данных, если их нет"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -48,7 +48,7 @@ def init_db():
     conn.close()
     print("[POSTGRES INFO] База данных проверена, таблицы user_logs и users готовы!")
 
-# Запускаем создание/проверку таблиц в облаке при старте сервера
+# Запускаем создание/проверку таблиц при старте сервера
 if DATABASE_URL:
     init_db()
 else:
@@ -96,14 +96,14 @@ def login_user(data: LoginData):
 
 @app.post("/api/register")
 def register_user(data: RegisterData):
-    """Сохранение нового пользователя в таблицу users (если его еще нет)"""
+    """Сохранение/обновление пользователя в таблице users"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # Вставляем пользователя, если логина ещё нет в базе (ON CONFLICT DO NOTHING / UPDATE)
+        # Если пользователя с таким логином еще нет — добавляем, если есть — обновляем роль и IP
         cursor.execute("""
             INSERT INTO users (username, role, password, client_ip, created_at) 
             VALUES (%s, %s, %s, %s, %s)

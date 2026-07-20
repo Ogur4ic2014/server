@@ -1,72 +1,82 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 import psycopg2
 import os
+import hashlib
 from datetime import datetime
 from typing import Optional
 
 app = FastAPI()
 
-# Получаем ссылку на базу данных Neon из настроек облака Render
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db_connection():
-    """Функция для быстрого подключения к облачной PostgreSQL"""
     return psycopg2.connect(DATABASE_URL)
 
+def hash_password(password: str) -> str:
+    """Хеширование пароля через SHA-256"""
+    if not password:
+        return ""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 def init_db():
-    """Функция, которая создает таблицы в облачной базе данных, если их нет"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Таблица логов входа
+    # Таблица логов входа
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             role TEXT NOT NULL,
-            password TEXT,
             client_ip TEXT,
             login_time TEXT NOT NULL
         );
     """)
     
-    # 2. Таблица пользователей
+    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             role TEXT NOT NULL,
-            password TEXT,
+            password_hash TEXT NOT NULL,
             client_ip TEXT,
             created_at TEXT NOT NULL
         );
     """)
     
+    # Базовый аккаунт администратора (если его ещё нет)
+    admin_login = "admin"
+    admin_pass_hash = hash_password("admin123")  # Укажи нужный пароль
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cursor.execute("""
+        INSERT INTO users (username, role, password_hash, client_ip, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (username) DO NOTHING;
+    """, (admin_login, "Инструктор / Преподаватель", admin_pass_hash, "127.0.0.1", current_time))
+
     conn.commit()
     cursor.close()
     conn.close()
-    print("[POSTGRES INFO] База данных проверена, таблицы user_logs и users готовы!")
+    print("[POSTGRES INFO] База данных проверена, таблицы и аккаунт админа готовы!")
 
-# Запускаем создание/проверку таблиц при старте сервера
 if DATABASE_URL:
     init_db()
-else:
-    print("[ERROR] Переменная окружения DATABASE_URL не найдена!")
 
 
 class LoginData(BaseModel):
     username: str
-    role: str
-    password: str = ""
-    client_ip: Optional[str] = "Не указан"
+    password: str
+    client_ip: Optional[str] = "127.0.0.1"
 
 
 class RegisterData(BaseModel):
     username: str
+    password: str
     role: str
-    password: str = ""
-    client_ip: Optional[str] = "Не указан"
+    client_ip: Optional[str] = "127.0.0.1"
 
 
 @app.get("/")
@@ -76,48 +86,85 @@ def read_root():
 
 @app.post("/api/login")
 def login_user(data: LoginData):
-    """Запись факта входа в логи"""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+    """Строгая авторизация пользователя"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # Поиск пользователя по логину
+    cursor.execute("SELECT username, role, password_hash FROM users WHERE username = %s;", (data.username,))
+    user = cursor.fetchone()
+    
+    if not user:
+        cursor.close()
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Пользователь с таким логином не найден!"
+        )
+    
+    db_username, db_role, db_pass_hash = user
+    
+    # Проверка пароля
+    if db_pass_hash != hash_password(data.password):
+        cursor.close()
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный пароль!"
+        )
+    
+    # Фиксация входа в логи
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute(
-        "INSERT INTO user_logs (username, role, password, client_ip, login_time) VALUES (%s, %s, %s, %s, %s)",
-        (data.username, data.role, data.password, data.client_ip, current_time)
+        "INSERT INTO user_logs (username, role, client_ip, login_time) VALUES (%s, %s, %s, %s)",
+        (db_username, db_role, data.client_ip, current_time)
     )
     conn.commit()
     cursor.close()
     conn.close()
 
-    print(f"\n[SERVER LOG] Получен вход от {data.username} ({data.role})")
-    return {"status": "success", "saved_to_logs": True}
+    return {
+        "status": "success",
+        "username": db_username,
+        "role": db_role
+    }
 
 
 @app.post("/api/register")
 def register_user(data: RegisterData):
-    """Сохранение/обновление пользователя в таблице users"""
+    """Регистрация нового пользователя"""
+    if not data.username.strip() or not data.password.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Логин и пароль не могут быть пустыми!"
+        )
+
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+    pass_hash = hash_password(data.password)
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    
+
     try:
-        # Если пользователя с таким логином еще нет — добавляем, если есть — обновляем роль и IP
         cursor.execute("""
-            INSERT INTO users (username, role, password, client_ip, created_at) 
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (username) DO UPDATE 
-            SET role = EXCLUDED.role, client_ip = EXCLUDED.client_ip;
-        """, (data.username, data.role, data.password, data.client_ip, current_time))
-        
+            INSERT INTO users (username, role, password_hash, client_ip, created_at)
+            VALUES (%s, %s, %s, %s, %s);
+        """, (data.username, data.role, pass_hash, data.client_ip, current_time))
+
         conn.commit()
-        print(f"[NEON DB LOG] Пользователь {data.username} сохранен/обновлен в таблице users!")
-        return {"status": "success", "saved_to_users": True}
+        return {"status": "success", "message": "Пользователь успешно зарегистрирован!"}
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Пользователь с таким логином уже существует!"
+        )
     except Exception as e:
         conn.rollback()
-        print(f"[ERROR DB] Ошибка сохранения пользователя: {e}")
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
     finally:
         cursor.close()
         conn.close()
@@ -125,47 +172,29 @@ def register_user(data: RegisterData):
 
 @app.get("/api/users")
 def get_users():
-    """Эндпоинт для выгрузки всех пользователей в Excel"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, username, role, password, client_ip FROM users ORDER BY id ASC;")
+    cursor.execute("SELECT id, username, role, client_ip FROM users ORDER BY id ASC;")
     rows = cursor.fetchall()
-    
     cursor.close()
     conn.close()
-    
-    users = []
-    for r in rows:
-        users.append({
-            "id": r[0],
-            "username": r[1],
-            "role": r[2],
-            "password": r[3],
-            "client_ip": r[4]
-        })
-    return users
+
+    return [
+        {"id": r[0], "username": r[1], "role": r[2], "password": "••••••••", "client_ip": r[3]}
+        for r in rows
+    ]
 
 
 @app.get("/api/logs")
 def get_logs():
-    """Эндпоинт для выгрузки всех логов в Excel"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     cursor.execute("SELECT id, username, role, client_ip, login_time FROM user_logs ORDER BY id DESC;")
     rows = cursor.fetchall()
-    
     cursor.close()
     conn.close()
-    
-    logs = []
-    for r in rows:
-        logs.append({
-            "id": r[0],
-            "username": r[1],
-            "role": r[2],
-            "client_ip": r[3],
-            "timestamp": r[4]
-        })
-    return logs
+
+    return [
+        {"id": r[0], "username": r[1], "role": r[2], "client_ip": r[3], "timestamp": r[4]}
+        for r in rows
+    ]

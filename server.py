@@ -9,6 +9,45 @@ from typing import Optional
 app = FastAPI()
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+# 1. Удаление конкретного пользователя по ID
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Проверяем, не пытаемся ли мы удалить самого первого админа
+        cursor.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
+        user = cursor.fetchone()
+        
+        if user and user[0] == "admin":
+            return {"status": "error", "message": "Нельзя удалить главного администратора!"}
+            
+        cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"status": "success", "message": "Пользователь удален"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. Очистка всех пользователей (кроме главного admin)
+@app.delete("/api/users/clear/all")
+def clear_all_users():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Удаляем всех, кроме пользователя с логином 'admin'
+        cursor.execute("DELETE FROM users WHERE username != 'admin';")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"status": "success", "message": "Все пользователи (кроме admin) удалены"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)

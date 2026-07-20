@@ -68,7 +68,8 @@ def init_db():
     cursor.execute("""
         INSERT INTO users (username, role, password_hash, client_ip, created_at)
         VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (username) DO NOTHING;
+        ON CONFLICT (username) DO UPDATE 
+        SET password_hash = EXCLUDED.password_hash;
     """, (admin_login, "Инструктор / Преподаватель", admin_pass_hash, "127.0.0.1", current_time))
 
     conn.commit()

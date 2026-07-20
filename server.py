@@ -23,7 +23,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Таблица логов входа
+    # 1. Таблица логов входа
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             id SERIAL PRIMARY KEY,
@@ -34,21 +34,35 @@ def init_db():
         );
     """)
     
-    # Таблица пользователей
+    # 2. Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             role TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
+            password_hash TEXT,
             client_ip TEXT,
             created_at TEXT NOT NULL
         );
     """)
     
-    # Базовый аккаунт администратора (если его ещё нет)
+    # ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ СТРУКТУРЫ (Миграция):
+    # Если таблица создана давно, добавляем колонку password_hash, если её нет
+    cursor.execute("""
+        DO $$ 
+        BEGIN 
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='users' AND column_name='password_hash'
+            ) THEN
+                ALTER TABLE users ADD COLUMN password_hash TEXT;
+            END IF;
+        END $$;
+    """)
+
+    # Базовый аккаунт администратора
     admin_login = "admin"
-    admin_pass_hash = hash_password("admin123")  # Укажи нужный пароль
+    admin_pass_hash = hash_password("admin123")
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute("""
@@ -60,7 +74,7 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
-    print("[POSTGRES INFO] База данных проверена, таблицы и аккаунт админа готовы!")
+    print("[POSTGRES INFO] База данных проверена и успешно обновлена!")
 
 if DATABASE_URL:
     init_db()

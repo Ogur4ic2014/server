@@ -73,11 +73,12 @@ def hash_password(password: str) -> str:
 
 
 # 1. В функции init_db() создаем полноценную таблицу для действий и аварий:
+# 1. В init_db() добавляем авто-создание новой таблицы с логированием:
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Таблица входов (оставляем)
+    # Таблица входов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             id SERIAL PRIMARY KEY,
@@ -88,7 +89,7 @@ def init_db():
         );
     """)
     
-    # NEW: Таблица действий операторов и аварий ПАЗ!
+    # Таблица действий операторов и аварий ПАЗ
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS system_action_logs (
             id SERIAL PRIMARY KEY,
@@ -100,19 +101,21 @@ def init_db():
         );
     """)
     
-    # (остальной код init_db остается без изменений...)
     conn.commit()
     cursor.close()
     conn.close()
+    print("[POSTGRES INFO] Все таблицы базы данных проверены и готовы к работе!")
 
 
-# 2. Pydantic-модель для входящих действий
+# 2. Pydantic-модель для входящих логов
 class ActionLogData(BaseModel):
     username: str
     role: str
     action: str
     details: str
 
+
+# 3. Прием логов от оператора (POST /api/logs)
 @app.post("/api/logs")
 def create_action_log(data: ActionLogData):
     try:
@@ -130,36 +133,42 @@ def create_action_log(data: ActionLogData):
         conn.close()
         return {"status": "success"}
     except Exception as e:
-        print(f"Ошибка сохранения лога в БД: {e}")
-        return {"status": "error", "details": str(e)}
+        print(f"[DB ERROR] Ошибка записи лога: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# 4. Отдача логов действий (а не просто входов!)
+# 4. Отдача логов клиенту (GET /api/logs)
 @app.get("/api/logs")
 def get_action_logs(current_user: dict = Depends(get_current_user)):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        SELECT id, username, role, action, details, timestamp 
-        FROM system_action_logs 
-        ORDER BY id DESC LIMIT 200;
-    """)
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Запрашиваем действия и аварии
+        cursor.execute("""
+            SELECT id, username, role, action, details, timestamp 
+            FROM system_action_logs 
+            ORDER BY id DESC LIMIT 200;
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
-    return [
-        {
-            "id": r[0], 
-            "username": r[1], 
-            "role": r[2], 
-            "action": r[3], 
-            "details": r[4], 
-            "timestamp": r[5]
-        }
-        for r in rows
-    ]
+        return [
+            {
+                "id": r[0], 
+                "username": r[1], 
+                "role": r[2], 
+                "action": r[3], 
+                "details": r[4], 
+                "timestamp": r[5]
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[DB ERROR] Ошибка чтения логов: {e}")
+        # Запасной вариант: если таблицы нет, возвращаем пустой список вместо ошибки 500!
+        return []
 
 
 # --- Pydantic МОДЕЛИ ---

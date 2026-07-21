@@ -110,26 +110,28 @@ def init_db():
 class ActionLogData(BaseModel):
     username: str
     role: str
-    action: str  # "OPERATOR", "ALARM", "INFO"
+    action: str
     details: str
 
-
-# 3. Прием нового действия/аварии от клиента
 @app.post("/api/logs")
 def create_action_log(data: ActionLogData):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    cursor.execute("""
-        INSERT INTO system_action_logs (username, role, action, details, timestamp)
-        VALUES (%s, %s, %s, %s, %s);
-    """, (data.username, data.role, data.action, data.details, current_time))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"status": "success"}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("""
+            INSERT INTO system_action_logs (username, role, action, details, timestamp)
+            VALUES (%s, %s, %s, %s, %s);
+        """, (data.username, data.role, data.action, data.details, current_time))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Ошибка сохранения лога в БД: {e}")
+        return {"status": "error", "details": str(e)}
 
 
 # 4. Отдача логов действий (а не просто входов!)

@@ -1,62 +1,76 @@
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
-import psycopg2
 import os
 import hashlib
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta
 from typing import Optional
+
+from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
+import psycopg2
 
 app = FastAPI()
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-# 1. Удаление конкретного пользователя по ID
-@app.delete("/api/users/{user_id}")
-def delete_user(user_id: int):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Проверяем, не пытаемся ли мы удалить самого первого админа
-        cursor.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
-        user = cursor.fetchone()
-        
-        if user and user[0] == "admin":
-            return {"status": "error", "message": "Нельзя удалить главного администратора!"}
-            
-        cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        return {"status": "success", "message": "Пользователь удален"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# 2. Очистка всех пользователей (кроме главного admin)
-@app.delete("/api/users/clear/all")
-def clear_all_users():
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Удаляем всех, кроме пользователя с логином 'admin'
-        cursor.execute("DELETE FROM users WHERE username != 'admin';")
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        return {"status": "success", "message": "Все пользователи (кроме admin) удалены"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# --- НАСТРОЙКИ JWT И БЕЗОПАСНОСТИ ---
+SECRET_KEY = os.environ.get("JWT_SECRET", "ELOU_AVT_SECRET_KEY_2026")  # Секретный ключ подписи
+ALGORITHM = "HS256"
+TOKEN_EXPIRE_HOURS = 12
 
+security = HTTPBearer()
+
+
+def create_access_token(data: dict) -> str:
+    """Генерация JWT-токена со сроком жизни 12 часов."""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(hours=TOKEN_EXPIRE_HOURS)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """Проверка и расшифровка JWT-токена из заголовка Authorization."""
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload  # Возвращает dict: {"sub": "username", "role": "role", "exp": ...}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Срок действия сессии истёк. Пожалуйста, войдите снова."
+        )
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Недействительный токен авторизации."
+        )
+
+
+def require_admin_role(user: dict = Depends(get_current_user)) -> dict:
+    """Проверка, что текущий пользователь — Администратор или Инструктор."""
+    user_role = str(user.get("role", "")).lower()
+    allowed_roles = ["admin", "администратор", "инструктор / преподаватель"]
+    
+    if user_role not in allowed_roles and str(user.get("sub", "")).lower() != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для выполнения данной операции!"
+        )
+    return user
+
+
+# --- РАБОТА С БАЗОЙ ДАННЫХ ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
 
 def hash_password(password: str) -> str:
     """Хеширование пароля через SHA-256"""
     if not password:
         return ""
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
 
 def init_db():
     conn = get_db_connection()
@@ -85,8 +99,7 @@ def init_db():
         );
     """)
     
-    # ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ СТРУКТУРЫ (Миграция):
-    # Если таблица создана давно, добавляем колонку password_hash, если её нет
+    # Миграция структуры
     cursor.execute("""
         DO $$ 
         BEGIN 
@@ -116,10 +129,12 @@ def init_db():
     conn.close()
     print("[POSTGRES INFO] База данных проверена и успешно обновлена!")
 
+
 if DATABASE_URL:
     init_db()
 
 
+# --- Pydantic МОДЕЛИ ---
 class LoginData(BaseModel):
     username: str
     password: str
@@ -133,6 +148,7 @@ class RegisterData(BaseModel):
     client_ip: Optional[str] = "127.0.0.1"
 
 
+# --- МАРШРУТЫ API ---
 @app.get("/")
 def read_root():
     return {"status": "Server is running", "db": "PostgreSQL (Neon) connected"}
@@ -140,7 +156,7 @@ def read_root():
 
 @app.post("/api/login")
 def login_user(data: LoginData):
-    """Строгая авторизация пользователя"""
+    """Строгая авторизация пользователя с генерацией JWT-токена"""
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -177,8 +193,13 @@ def login_user(data: LoginData):
     cursor.close()
     conn.close()
 
+    # Создаём JWT-токен
+    token = create_access_token({"sub": db_username, "role": db_role})
+
     return {
         "status": "success",
+        "access_token": token,
+        "token_type": "bearer",
         "username": db_username,
         "role": db_role
     }
@@ -225,7 +246,8 @@ def register_user(data: RegisterData):
 
 
 @app.get("/api/users")
-def get_users():
+def get_users(current_user: dict = Depends(get_current_user)):
+    """Получение списка всех пользователей (доступно только зарегистрированным)"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, username, role, client_ip FROM users ORDER BY id ASC;")
@@ -240,7 +262,8 @@ def get_users():
 
 
 @app.get("/api/logs")
-def get_logs():
+def get_logs(current_user: dict = Depends(get_current_user)):
+    """Получение логов (доступно только авторизованным)"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, username, role, client_ip, login_time FROM user_logs ORDER BY id DESC;")
@@ -252,3 +275,45 @@ def get_logs():
         {"id": r[0], "username": r[1], "role": r[2], "client_ip": r[3], "timestamp": r[4]}
         for r in rows
     ]
+
+
+# 1. Удаление конкретного пользователя по ID (Защищено: ТОЛЬКО ДЛЯ АДМИНА)
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, current_admin: dict = Depends(require_admin_role)):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT username FROM users WHERE id = %s;", (user_id,))
+        user = cursor.fetchone()
+        
+        if user and user[0] == "admin":
+            cursor.close()
+            conn.close()
+            return {"status": "error", "message": "Нельзя удалить главного администратора!"}
+            
+        cursor.execute("DELETE FROM users WHERE id = %s;", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"status": "success", "message": "Пользователь удален"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 2. Очистка всех пользователей (Защищено: ТОЛЬКО ДЛЯ АДМИНА)
+@app.delete("/api/users/clear/all")
+def clear_all_users(current_admin: dict = Depends(require_admin_role)):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM users WHERE username != 'admin';")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return {"status": "success", "message": "Все пользователи (кроме admin) удалены"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

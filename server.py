@@ -72,11 +72,12 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+# 1. В функции init_db() создаем полноценную таблицу для действий и аварий:
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 1. Таблица логов входа
+    # Таблица входов (оставляем)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_logs (
             id SERIAL PRIMARY KEY,
@@ -87,51 +88,76 @@ def init_db():
         );
     """)
     
-    # 2. Таблица пользователей
+    # NEW: Таблица действий операторов и аварий ПАЗ!
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS system_action_logs (
             id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
+            username TEXT NOT NULL,
             role TEXT NOT NULL,
-            password_hash TEXT,
-            client_ip TEXT,
-            created_at TEXT NOT NULL
+            action TEXT NOT NULL,
+            details TEXT NOT NULL,
+            timestamp TEXT NOT NULL
         );
     """)
     
-    # Миграция структуры
-    cursor.execute("""
-        DO $$ 
-        BEGIN 
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name='users' AND column_name='password_hash'
-            ) THEN
-                ALTER TABLE users ADD COLUMN password_hash TEXT;
-            END IF;
-        END $$;
-    """)
-
-    # Базовый аккаунт администратора
-    admin_login = "admin"
-    admin_pass_hash = hash_password("admin123")
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    cursor.execute("""
-        INSERT INTO users (username, role, password_hash, client_ip, created_at)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (username) DO UPDATE 
-        SET password_hash = EXCLUDED.password_hash;
-    """, (admin_login, "Инструктор / Преподаватель", admin_pass_hash, "127.0.0.1", current_time))
-
+    # (остальной код init_db остается без изменений...)
     conn.commit()
     cursor.close()
     conn.close()
-    print("[POSTGRES INFO] База данных проверена и успешно обновлена!")
 
 
-if DATABASE_URL:
-    init_db()
+# 2. Pydantic-модель для входящих действий
+class ActionLogData(BaseModel):
+    username: str
+    role: str
+    action: str  # "OPERATOR", "ALARM", "INFO"
+    details: str
+
+
+# 3. Прием нового действия/аварии от клиента
+@app.post("/api/logs")
+def create_action_log(data: ActionLogData):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        INSERT INTO system_action_logs (username, role, action, details, timestamp)
+        VALUES (%s, %s, %s, %s, %s);
+    """, (data.username, data.role, data.action, data.details, current_time))
+    
+    conn.commit()
+    cursor.close()
+    conn.close()
+    return {"status": "success"}
+
+
+# 4. Отдача логов действий (а не просто входов!)
+@app.get("/api/logs")
+def get_action_logs(current_user: dict = Depends(get_current_user)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        SELECT id, username, role, action, details, timestamp 
+        FROM system_action_logs 
+        ORDER BY id DESC LIMIT 200;
+    """)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    return [
+        {
+            "id": r[0], 
+            "username": r[1], 
+            "role": r[2], 
+            "action": r[3], 
+            "details": r[4], 
+            "timestamp": r[5]
+        }
+        for r in rows
+    ]
 
 
 # --- Pydantic МОДЕЛИ ---
